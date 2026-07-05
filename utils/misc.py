@@ -47,7 +47,7 @@ def export_points_to_ply(
     pcd.colors = o3d.utility.Vector3dVector(colors)
     o3d.io.write_point_cloud(save_path, pcd)
 
-def export_gaussians_to_ply(model, path, name='point_cloud.ply', aabb=None):
+def export_gaussians_to_ply(model, path, name='point_cloud.ply', aabb=None, world_coords: bool = False):
     model.eval()
     filename = os.path.join(path, name)
     map_to_tensors = {}
@@ -64,8 +64,11 @@ def export_gaussians_to_ply(model, path, name='point_cloud.ply', aabb=None):
             aabb_center = positions.mean(0)
             aabb_sacle_max = (positions - aabb_center).abs().max() * 1.1
             vis_mask = torch.ones_like(positions[:, 0], dtype=torch.bool)
-            
-        positions = ((positions[vis_mask] - aabb_center) / aabb_sacle_max).cpu().numpy()
+
+        if world_coords:
+            positions = positions[vis_mask].cpu().numpy()
+        else:
+            positions = ((positions[vis_mask] - aabb_center) / aabb_sacle_max).cpu().numpy()
         map_to_tensors["positions"] = o3d.core.Tensor(positions, o3d.core.float32)
         map_to_tensors["normals"] = o3d.core.Tensor(np.zeros_like(positions), o3d.core.float32)
 

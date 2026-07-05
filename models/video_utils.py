@@ -74,6 +74,9 @@ def render_images(
         logger.info(f"\t Full Image LPIPS: {render_results['lpips']:.4f}")
         logger.info(f"\t     Non-Sky PSNR: {render_results['occupied_psnr']:.4f}")
         logger.info(f"\t     Non-Sky SSIM: {render_results['occupied_ssim']:.4f}")
+        logger.info(f"\t Static-Only PSNR: {render_results['static_psnr']:.4f}")
+        logger.info(f"\t Static-Only SSIM: {render_results['static_ssim']:.4f}")
+        logger.info(f"\tStatic-Only LPIPS: {render_results['static_lpips']:.4f}")
         logger.info(f"\tDynamic-Only PSNR: {render_results['masked_psnr']:.4f}")
         logger.info(f"\tDynamic-Only SSIM: {render_results['masked_ssim']:.4f}")
         logger.info(f"\t  Human-Only PSNR: {render_results['human_psnr']:.4f}")
@@ -123,6 +126,7 @@ def render(
         human_psnrs, human_ssims = [], []
         vehicle_psnrs, vehicle_ssims = [], []
         occupied_psnrs, occupied_ssims = [], []
+        static_psnrs, static_ssims, static_lpipss = [], [], []
 
     with torch.no_grad():
         indices = vis_indices if vis_indices is not None else range(len(dataset))
@@ -159,9 +163,14 @@ def render(
             green_background = torch.tensor([0.0, 177, 64]) / 255.0
             green_background = green_background.to(rgb.device)
             if "Background_rgb" in results:
+                # Use sky as background if available, otherwise use green background
+                if "rgb_sky" in results:
+                    background_fill = results["rgb_sky"]
+                else:
+                    background_fill = green_background
                 Background_rgb = results["Background_rgb"] * results[
                     "Background_opacity"
-                ] + green_background * (1 - results["Background_opacity"])
+                ] + background_fill * (1 - results["Background_opacity"])
                 Background_rgbs.append(get_numpy(Background_rgb))
             if "RigidNodes_rgb" in results:
                 RigidNodes_rgb = results["RigidNodes_rgb"] * results[
@@ -316,6 +325,38 @@ def render(
                                 full=True,
                             )[1][vehicle_mask].mean()
                         )
+                
+                # Static region metrics (exclude all dynamic objects)
+                if "dynamic_masks" in image_infos:
+                    static_mask = ~get_numpy(image_infos["dynamic_masks"]).astype(bool)
+                    if static_mask.sum() > 0:
+                        static_psnrs.append(
+                            compute_psnr(
+                                rgb[static_mask], image_infos["pixels"][static_mask]
+                            )
+                        )
+                        static_ssims.append(
+                            ssim(
+                                get_numpy(rgb),
+                                get_numpy(image_infos["pixels"]),
+                                data_range=1.0,
+                                channel_axis=-1,
+                                full=True,
+                            )[1][static_mask].mean()
+                        )
+                        
+                        # For LPIPS: mask out dynamic regions (fill with black)
+                        rgb_masked = rgb.clone()
+                        gt_masked = image_infos["pixels"].clone()
+                        dynamic_mask_tensor = image_infos["dynamic_masks"].bool()
+                        rgb_masked[dynamic_mask_tensor] = 0.0
+                        gt_masked[dynamic_mask_tensor] = 0.0
+                        
+                        static_lpips = trainer.lpips(
+                            rgb_masked[None, ...].permute(0, 3, 1, 2),
+                            gt_masked[None, ...].permute(0, 3, 1, 2)
+                        )
+                        static_lpipss.append(static_lpips.item())
 
     # messy aggregation...
     results_dict = {}
@@ -330,6 +371,9 @@ def render(
     results_dict["human_ssim"] = non_zero_mean(human_ssims) if compute_metrics else -1
     results_dict["vehicle_psnr"] = non_zero_mean(vehicle_psnrs) if compute_metrics else -1
     results_dict["vehicle_ssim"] = non_zero_mean(vehicle_ssims) if compute_metrics else -1
+    results_dict["static_psnr"] = non_zero_mean(static_psnrs) if compute_metrics else -1
+    results_dict["static_ssim"] = non_zero_mean(static_ssims) if compute_metrics else -1
+    results_dict["static_lpips"] = non_zero_mean(static_lpipss) if compute_metrics else -1
     results_dict["rgbs"] = rgbs
     results_dict["depths"] = depths
     results_dict["cam_names"] = cam_names
@@ -460,6 +504,63 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
     
     writer.close()
     print(f"Video saved to {save_path}")
+
+
+def render_novel_background_views(
+    trainer,
+    render_data: list,
+    save_path: str,
+    fps: int = 24,
+    drive_frame_count: int = 0,
+    spin_segment_count: int = 0,
+) -> None:
+    """Render novel views using Background Gaussians only with a black background."""
+    trainer.set_eval()
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    writer = imageio.get_writer(save_path, mode="I", fps=fps)
+
+    with torch.no_grad():
+        for frame_idx, frame_data in enumerate(render_data):
+            for key, value in frame_data["cam_infos"].items():
+                frame_data["cam_infos"][key] = value.cuda(non_blocking=True)
+            for key, value in frame_data["image_infos"].items():
+                frame_data["image_infos"][key] = value.cuda(non_blocking=True)
+
+            if drive_frame_count > 0 and spin_segment_count > 0:
+                if frame_idx < drive_frame_count:
+                    normed_time = frame_idx / max(drive_frame_count - 1, 1) * 0.5
+                elif frame_idx < drive_frame_count + spin_segment_count:
+                    normed_time = 0.5
+                else:
+                    resume_idx = frame_idx - drive_frame_count - spin_segment_count
+                    resume_count = max(
+                        len(render_data) - drive_frame_count - spin_segment_count, 1
+                    )
+                    normed_time = 0.5 + resume_idx / max(resume_count - 1, 1) * 0.5
+            elif drive_frame_count > 0 and frame_idx < drive_frame_count:
+                normed_time = frame_idx / max(drive_frame_count - 1, 1) * 0.5
+            elif drive_frame_count > 0:
+                orbit_idx = frame_idx - drive_frame_count
+                orbit_count = max(len(render_data) - drive_frame_count, 1)
+                normed_time = 0.5 + orbit_idx / max(orbit_count - 1, 1) * 0.5
+            else:
+                normed_time = frame_idx / max(len(render_data) - 1, 1)
+
+            frame_data["image_infos"]["normed_time"].fill_(normed_time)
+
+            outputs = trainer(
+                image_infos=frame_data["image_infos"],
+                camera_infos=frame_data["cam_infos"],
+                novel_view=True,
+            )
+
+            bg_rgb = outputs["Background_rgb"].cpu().numpy().clip(min=0.0, max=1.0)
+            bg_op = outputs["Background_opacity"].cpu().numpy().clip(min=0.0, max=1.0)
+            frame = (bg_rgb * bg_op).clip(0.0, 1.0)
+            writer.append_data((frame * 255).astype(np.uint8))
+
+    writer.close()
+    print(f"Background novel view video saved to {save_path}")
 
 
 def save_concatenated_videos(

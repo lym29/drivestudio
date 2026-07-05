@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List, Callable
+from typing import Dict, Tuple, List, Callable, Optional
 from omegaconf import OmegaConf
 import os
 import abc
@@ -12,6 +12,7 @@ from PIL import Image
 import torch
 from torch import Tensor
 from datasets.dataset_meta import DATASETS_CONFIG
+from utils.camera import sample_c2w_at_normed_time
 
 logger = logging.getLogger()
 
@@ -1129,4 +1130,82 @@ class ScenePixelSource(abc.ABC):
                 "image_infos": image_infos,
             })
         
+        return render_data
+
+    def prepare_ego_speed_render_data(
+        self,
+        dataset_type: str,
+        cam_id: int = 0,
+        ego_speed_factor: float = 1.0,
+        num_output_frames: Optional[int] = None,
+    ) -> list:
+        """
+        Prepare render data where the ego camera moves at a scaled speed.
+
+        For each output frame at world time t in [0, 1]:
+        - ego pose uses t_ego = min(t * ego_speed_factor, 1.0)
+        - dynamic objects use world time t via ``world_normed_time``
+        """
+        if dataset_type == "argoverse" and cam_id == 0:
+            cam_id = 1
+
+        cam = self.camera_data[cam_id]
+        original_poses = cam.cam_to_worlds
+        intrinsics = cam.intrinsics[0]
+        H, W = cam.HEIGHT, cam.WIDTH
+        original_frame_count = self.num_frames
+        num_frames = (
+            len(original_poses) if num_output_frames is None else num_output_frames
+        )
+
+        render_data = []
+        for i in range(num_frames):
+            t_world = i / max(num_frames - 1, 1)
+            t_ego = min(t_world * ego_speed_factor, 1.0)
+            c2w = sample_c2w_at_normed_time(original_poses, t_ego)
+            ego_frame_idx = int(round(t_ego * (original_frame_count - 1)))
+
+            x, y = torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy")
+            x, y = x.to(self.device), y.to(self.device)
+
+            origins, viewdirs, direction_norm = get_rays(
+                x.flatten(), y.flatten(), c2w, intrinsics
+            )
+            origins = origins.reshape(H, W, 3)
+            viewdirs = viewdirs.reshape(H, W, 3)
+            direction_norm = direction_norm.reshape(H, W, 1)
+
+            cam_infos = {
+                "camera_to_world": c2w,
+                "intrinsics": intrinsics,
+                "height": torch.tensor([H], dtype=torch.long, device=self.device),
+                "width": torch.tensor([W], dtype=torch.long, device=self.device),
+            }
+
+            image_infos = {
+                "origins": origins,
+                "viewdirs": viewdirs,
+                "direction_norm": direction_norm,
+                "img_idx": torch.full((H, W), i, dtype=torch.long, device=self.device),
+                "frame_idx": torch.full(
+                    (H, W), ego_frame_idx, dtype=torch.long, device=self.device
+                ),
+                "normed_time": torch.full(
+                    (H, W), t_ego, dtype=torch.float32, device=self.device
+                ),
+                "world_normed_time": torch.full(
+                    (H, W), t_world, dtype=torch.float32, device=self.device
+                ),
+                "pixel_coords": torch.stack(
+                    [y.float() / H, x.float() / W], dim=-1
+                ),
+            }
+
+            render_data.append(
+                {
+                    "cam_infos": cam_infos,
+                    "image_infos": image_infos,
+                }
+            )
+
         return render_data

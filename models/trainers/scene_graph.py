@@ -9,6 +9,8 @@ from utils.geometry import uniform_sample_sphere
 
 logger = logging.getLogger()
 
+DYNAMIC_GAUSSIAN_CLASSES = frozenset({"RigidNodes", "DeformableNodes", "SMPLNodes"})
+
 class MultiTrainer(BasicTrainer):
     def __init__(
         self,
@@ -211,8 +213,16 @@ class MultiTrainer(BasicTrainer):
 
         # set current time or use temporal smoothing
         normed_time = image_infos["normed_time"].flatten()[0]
+        if "world_normed_time" in image_infos:
+            world_normed_time = image_infos["world_normed_time"].flatten()[0]
+        else:
+            world_normed_time = normed_time
+
         self.cur_frame = torch.argmin(
             torch.abs(self.normalized_timestamps - normed_time)
+        )
+        self.world_cur_frame = torch.argmin(
+            torch.abs(self.normalized_timestamps - world_normed_time)
         )
         
         # for evaluation
@@ -223,8 +233,16 @@ class MultiTrainer(BasicTrainer):
         # assigne current frame to gaussian models
         for class_name in self.gaussian_classes.keys():
             model = self.models[class_name]
+            if class_name in DYNAMIC_GAUSSIAN_CLASSES:
+                frame_id = self.world_cur_frame
+                time_value = world_normed_time
+            else:
+                frame_id = self.cur_frame
+                time_value = normed_time
             if hasattr(model, 'set_cur_frame'):
-                model.set_cur_frame(self.cur_frame)
+                model.set_cur_frame(frame_id)
+            if hasattr(model, 'set_cur_normed_time'):
+                model.set_cur_normed_time(time_value)
         
         # prapare data
         processed_cam = self.process_camera(

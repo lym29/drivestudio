@@ -110,9 +110,9 @@ cd drivestudio
 conda create -n drivestudio python=3.9 -y
 conda activate drivestudio
 pip install -r requirements.txt
-pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.3.0
-pip install git+https://github.com/facebookresearch/pytorch3d.git
-pip install git+https://github.com/NVlabs/nvdiffrast
+pip install git+https://githubfast.com/nerfstudio-project/gsplat.git@v1.3.0
+pip install git+https://githubfast.com/facebookresearch/pytorch3d.git
+pip install git+https://githubfast.com/NVlabs/nvdiffrast
 
 # Set up for SMPL Gaussians
 cd third_party/smplx/
@@ -136,13 +136,17 @@ We support most popular public driving datasets. Detailed instructions for downl
 export PYTHONPATH=$(pwd)
 start_timestep=0 # start frame index for training
 end_timestep=-1 # end frame index, -1 for the last frame
+output_root="/DATA/OmniRe-output"
+project=recon
+expname="exp-nusences-mini"
+scene_idx=0
 
 python tools/train.py \
-    --config_file configs/omnire.yaml \
+    --config_file configs/omnire_extended_cam.yaml \
     --output_root $output_root \
     --project $project \
     --run_name $expname \
-    dataset=waymo/3cams \
+    dataset=nuscenes/6cams \
     data.scene_idx=$scene_idx \
     data.start_timestep=$start_timestep \
     data.end_timestep=$end_timestep
@@ -152,8 +156,11 @@ python tools/train.py \
 - Specify dataset and number of cameras by setting `dataset`. Examples: `waymo/1cams`, `waymo/5cams`, `pandaset/6cams`, `argoverse/7cams`, etc.
   You can set up arbitrary camera combinations for each dataset. See `configs/datasets/` for custom configuration details.
 - For over 3 cameras or 450+ images, we recommend using `omnire_extended_cam.yaml`. It works better in practice.
+
 ### Evaluation
 ```shell
+export PYTHONPATH=$(pwd)
+ckpt_path="/DATA/OmniRe-output/recon/exp-nusences-mini/checkpoint_final.pth"
 python tools/eval.py --resume_from $ckpt_path
 ```
 

@@ -17,6 +17,8 @@ class RigidNodes(VanillaGaussians):
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.instance_time_scales: Dict[int, float] = {}
+        self.cur_normed_time: float = 0.0
         
     @property
     def num_instances(self):
@@ -29,12 +31,102 @@ class RigidNodes(VanillaGaussians):
         """
         get the mask for valid points
         """
-        return self.instances_fv[self.cur_frame][self.point_ids[..., 0]]
+        fv = self.instances_fv[self.cur_frame].clone()
+        for inst_idx, scale in self.instance_time_scales.items():
+            if abs(scale - 1.0) < 1e-6:
+                continue
+            scaled_t = min(self.cur_normed_time * scale, 1.0)
+            frame_lo, alpha = self._normed_time_to_frame_params(scaled_t)
+            fv_inst = self.instances_fv[frame_lo, inst_idx]
+            if alpha > 1e-6:
+                frame_hi = min(frame_lo + 1, self.num_frames - 1)
+                fv_inst = fv_inst | self.instances_fv[frame_hi, inst_idx]
+            fv[inst_idx] = fv_inst
+        return fv[self.point_ids[..., 0]]
     
     def set_cur_frame(self, frame_id: int):
         self.cur_frame = frame_id
+
+    def set_cur_normed_time(self, normed_time: float) -> None:
+        if isinstance(normed_time, torch.Tensor):
+            normed_time = normed_time.item()
+        self.cur_normed_time = float(normed_time)
+
+    def set_instance_time_scales(self, scales: Dict[int, float]) -> None:
+        self.instance_time_scales = dict(scales)
+
+    def clear_instance_time_scales(self) -> None:
+        self.instance_time_scales = {}
+
     def register_normalized_timestamps(self, normalized_timestamps: int):
         self.normalized_timestamps = normalized_timestamps
+
+    def _normed_time_to_frame_params(self, normed_time: float) -> Tuple[int, float]:
+        t = max(0.0, min(1.0, float(normed_time)))
+        if self.num_frames <= 1:
+            return 0, 0.0
+        float_idx = t * (self.num_frames - 1)
+        frame_lo = int(float_idx)
+        alpha = float_idx - frame_lo
+        return frame_lo, alpha
+
+    def _get_instance_pose_at_time(
+        self, instance_idx: int, normed_time: float
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        frame_lo, alpha = self._normed_time_to_frame_params(normed_time)
+        frame_hi = min(frame_lo + 1, self.num_frames - 1)
+
+        quat_lo = self.instances_quats[frame_lo, instance_idx]
+        quat_hi = self.instances_quats[frame_hi, instance_idx]
+        if alpha < 1e-6 or frame_lo == frame_hi:
+            quat = quat_lo
+        else:
+            quat = interpolate_quats(
+                quat_lo.unsqueeze(0), quat_hi.unsqueeze(0), alpha
+            ).squeeze(0)
+
+        trans_lo = self.instances_trans[frame_lo, instance_idx]
+        trans_hi = self.instances_trans[frame_hi, instance_idx]
+        trans = trans_lo * (1.0 - alpha) + trans_hi * alpha
+        return quat, trans
+
+    def _get_frame_poses(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.in_test_set and (
+            self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
+        ):
+            _quats_prev_frame = self.instances_quats[self.cur_frame - 1]
+            _quats_next_frame = self.instances_quats[self.cur_frame + 1]
+            _quats_cur_frame = self.instances_quats[self.cur_frame]
+            interpolated_quats = interpolate_quats(_quats_prev_frame, _quats_next_frame)
+
+            inter_valid_mask = (
+                self.instances_fv[self.cur_frame - 1]
+                & self.instances_fv[self.cur_frame + 1]
+            )
+            quats_cur_frame = torch.where(
+                inter_valid_mask[:, None], interpolated_quats, _quats_cur_frame
+            )
+
+            _prev_ins_trans = self.instances_trans[self.cur_frame - 1]
+            _next_ins_trans = self.instances_trans[self.cur_frame + 1]
+            _cur_ins_trans = self.instances_trans[self.cur_frame]
+            interpolated_trans = (_prev_ins_trans + _next_ins_trans) * 0.5
+            trans_cur_frame = torch.where(
+                inter_valid_mask[:, None], interpolated_trans, _cur_ins_trans
+            )
+        else:
+            quats_cur_frame = self.instances_quats[self.cur_frame]
+            trans_cur_frame = self.instances_trans[self.cur_frame]
+
+        for inst_idx, scale in self.instance_time_scales.items():
+            if abs(scale - 1.0) < 1e-6:
+                continue
+            scaled_t = min(self.cur_normed_time * scale, 1.0)
+            quat, trans = self._get_instance_pose_at_time(inst_idx, scaled_t)
+            quats_cur_frame[inst_idx] = quat
+            trans_cur_frame[inst_idx] = trans
+
+        return quats_cur_frame, trans_cur_frame
         
     def create_from_pcd(self, instance_pts_dict: Dict[str, torch.Tensor]) -> None:
         """
@@ -57,6 +149,7 @@ class RigidNodes(VanillaGaussians):
         instances_size = []
         instances_fv = []
         point_ids = []
+        dataset_instance_ids = []
         for id_in_model, (id_in_dataset, v) in enumerate(instance_pts_dict.items()):
             init_means.append(v["pts"])
             init_colors.append(v["colors"])
@@ -64,12 +157,16 @@ class RigidNodes(VanillaGaussians):
             instances_size.append(v["size"])
             instances_fv.append(v["frame_info"].unsqueeze(1))
             point_ids.append(torch.full((v["num_pts"], 1), id_in_model, dtype=torch.long))
+            dataset_instance_ids.append(int(id_in_dataset))
         init_means = torch.cat(init_means, dim=0).to(self.device) # (N, 3)
         init_colors = torch.cat(init_colors, dim=0).to(self.device) # (N, 3)
         instances_pose = torch.cat(instances_pose, dim=1).to(self.device) # (num_frame, num_instances, 4, 4)
         self.instances_size = torch.stack(instances_size).to(self.device) # (num_instances, 3)
         self.instances_fv = torch.cat(instances_fv, dim=1).to(self.device) # (num_frame, num_instances)
         self.point_ids = torch.cat(point_ids, dim=0).to(self.device)
+        self.dataset_instance_ids = torch.tensor(
+            dataset_instance_ids, dtype=torch.long, device=self.device
+        )
         instances_quats = self.get_instances_quats(instances_pose)
         instances_trans = instances_pose[..., :3, 3]
         
@@ -319,40 +416,11 @@ class RigidNodes(VanillaGaussians):
         """
         assert means.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        if self.in_test_set and (
-            self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            # use the previous and next frame to interpolate the pose
-            _quats_prev_frame = self.instances_quats[self.cur_frame - 1]
-            _quats_next_frame = self.instances_quats[self.cur_frame + 1]
-            _quats_cur_frame = self.instances_quats[self.cur_frame]
-            interpolated_quats = interpolate_quats(_quats_prev_frame, _quats_next_frame)
-            
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            quats_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_quats, _quats_cur_frame
-            )
-        else:
-            quats_cur_frame = self.instances_quats[self.cur_frame] # (num_instances, 4)
+        quats_cur_frame, trans_cur_frame = self._get_frame_poses()
         rot_cur_frame = quat_to_rotmat(
             self.quat_act(quats_cur_frame)
         )                                                          # (num_instances, 3, 3)
         rot_per_pts = rot_cur_frame[self.point_ids[..., 0]]        # (num_points, 3, 3)
-        
-        if self.in_test_set and (
-            self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_ins_trans = self.instances_trans[self.cur_frame - 1]
-            _next_ins_trans = self.instances_trans[self.cur_frame + 1]
-            _cur_ins_trans = self.instances_trans[self.cur_frame]
-            interpolated_trans = (_prev_ins_trans + _next_ins_trans) * 0.5
-            
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            trans_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_trans, _cur_ins_trans
-            )
-        else:
-            trans_cur_frame = self.instances_trans[self.cur_frame] # (num_instances, 3)
         trans_per_pts = trans_cur_frame[self.point_ids[..., 0]]
         
         # transform the means to world space
@@ -368,7 +436,7 @@ class RigidNodes(VanillaGaussians):
         """
         assert quats.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        global_quats_cur_frame = self.instances_quats[self.cur_frame]
+        global_quats_cur_frame, _ = self._get_frame_poses()
         global_quats_per_pts = global_quats_cur_frame[self.point_ids[..., 0]]
             
         global_quats_per_pts = self.quat_act(global_quats_per_pts)
@@ -484,6 +552,7 @@ class RigidNodes(VanillaGaussians):
             "points_ids": self.point_ids,
             "instances_size": self.instances_size,
             "instances_fv": self.instances_fv,
+            "dataset_instance_ids": getattr(self, "dataset_instance_ids", None),
         })
         return state_dict
     
@@ -491,6 +560,7 @@ class RigidNodes(VanillaGaussians):
         self.point_ids = state_dict.pop("points_ids")
         self.instances_size = state_dict.pop("instances_size")
         self.instances_fv = state_dict.pop("instances_fv")
+        self.dataset_instance_ids = state_dict.pop("dataset_instance_ids", None)
         self.instances_trans = Parameter(
             torch.zeros(self.num_frames, self.num_instances, 3, device=self.device)
         )

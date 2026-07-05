@@ -1,4 +1,4 @@
-from typing import Dict, Union, Literal
+from typing import Dict, Union, Literal, Optional
 import logging
 import os
 import cv2
@@ -15,7 +15,7 @@ from datasets.base.scene_dataset import SceneDataset
 from datasets.base.split_wrapper import SplitWrapper
 from utils.visualization import get_layout
 from utils.geometry import transform_points
-from utils.camera import get_interp_novel_trajectories
+from utils.camera import get_interp_novel_trajectories, sample_c2w_at_normed_time
 from utils.misc import export_points_to_ply, import_str
 
 logger = logging.getLogger()
@@ -102,6 +102,9 @@ class DrivingDataset(SceneDataset):
         
     @property
     def instance_num(self):
+        # Handle case when there are no instances or frames
+        if len(self.pixel_source.instances_pose) == 0:
+            return 0
         return len(self.pixel_source.instances_pose[0])
     
     @property
@@ -708,7 +711,8 @@ class DrivingDataset(SceneDataset):
     def get_novel_render_traj(
         self,
         traj_types: List[str] = ["front_center_interp"],
-        target_frames: int = 100
+        target_frames: int = 100,
+        traj_kwargs: Optional[Dict] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Get multiple novel trajectories of the scene for rendering.
@@ -719,8 +723,11 @@ class DrivingDataset(SceneDataset):
                 - "front_center_interp": Interpolate key frames from the front center camera
                 - "s_curve": S-shaped trajectory using the front three cameras
                 - "three_key_poses": Creates a trajectory using three key poses from different cameras
+                - "orbit_pullback": Drive the first half, then pull back and orbit
             target_frames: int
                 The total number of frames for each novel trajectory
+            traj_kwargs: Optional[Dict]
+                Extra parameters passed to trajectory generators
         
         Returns:
             Dict[str, torch.Tensor]: A dictionary where keys are trajectory types and values
@@ -737,7 +744,8 @@ class DrivingDataset(SceneDataset):
                 self.scene_idx,
                 per_cam_poses,
                 traj_type,
-                target_frames
+                target_frames,
+                traj_kwargs=traj_kwargs,
             )
         
         return novel_trajs
@@ -756,3 +764,22 @@ class DrivingDataset(SceneDataset):
             """
             # Call the PixelSource's method
             return self.pixel_source.prepare_novel_view_render_data(self.type, traj)
+
+    def prepare_ego_speed_render_data(
+        self,
+        cam_id: int = 0,
+        ego_speed_factor: float = 1.0,
+        num_output_frames: Optional[int] = None,
+    ) -> list:
+        """
+        Prepare render data for ego-speed simulation.
+
+        The ego camera advances at ``ego_speed_factor`` relative to world time,
+        while dynamic objects stay on the original world timeline.
+        """
+        return self.pixel_source.prepare_ego_speed_render_data(
+            dataset_type=self.type,
+            cam_id=cam_id,
+            ego_speed_factor=ego_speed_factor,
+            num_output_frames=num_output_frames,
+        )

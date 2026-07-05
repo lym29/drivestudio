@@ -33,6 +33,19 @@ def extract_humanpose(
         narrow_width_ratio=0.2, fps=fps
     )
     
+    # Check if there are any GT human annotations
+    has_gt_humans = any(len(gt_tracks) > 0 for gt_tracks in GTTracks_meta.values())
+    
+    if not has_gt_humans:
+        logger.warning(f"No GT human annotations found in {scene_dir}, skipping human pose extraction.")
+        # Save empty smpl.pkl
+        smpl_meta = {}
+        joblib.dump(
+            smpl_meta,
+            os.path.join(scene_dir, "humanpose", "smpl.pkl")
+        )
+        return
+    
     # run 4DHuman to get predicted human tracks with SMPL parameters
     PredTracks_meta = run_4DHumans(
         scene_dir, camera_list=camera_list,

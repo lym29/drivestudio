@@ -15,6 +15,9 @@ Download the raw data from the [official NuScenes website](https://www.nuscenes.
 ```shell
 mkdir -p ./data/nuscenes
 ln -s $PATH_TO_NUSCENES ./data/nuscenes/raw # ['v1.0-mini', 'v1.0-trainval', 'v1.0-test'] lies in it
+
+ln -s /data-20T/nuscene-raw/ ./data/nuscenes/raw
+ln -s /data-20T/OmniRe-data-processed/ ./data/nuscenes/processed
 ```
 
 We'll use the **v1.0-mini split** in our examples. The process is similar for other splits.
@@ -29,14 +32,14 @@ pip install nuscenes-devkit
 To process the 10 scenes in NuScenes **v1.0-mini split**, you can run:
 
 ```shell
-# export PYTHONPATH=\path\to\project
+export PYTHONPATH=$(pwd)
 python datasets/preprocess.py \
     --data_root data/nuscenes/raw \
-    --target_dir data/nuscenes/processed \
+    --target_dir /DATA/OmniRe-data-processed/processed \
     --dataset nuscenes \
-    --split v1.0-mini \
+    --split v1.0-trainval \
     --start_idx 0 \
-    --num_scenes 10 \
+    --num_scenes 150 \
     --interpolate_N 4 \
     --workers 32 \
     --process_keys images lidar calib dynamic_masks objects
@@ -94,15 +97,28 @@ If you encounter problems downloading the original SegFormer checkpoint from the
 
 ```shell
 conda activate segformer
-segformer_path=/path/to/segformer
+segformer_path=/DATA/ayc_data/SegFormer
 split=mini
-
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 python datasets/tools/extract_masks.py \
-    --data_root data/nuscenes/processed_10Hz/$split \
+    --data_root data/nuscenes/processed/processed_10Hz/$split \
     --segformer_path=$segformer_path \
     --checkpoint=$segformer_path/pretrained/segformer.b5.1024x1024.city.160k.pth \
     --start_idx 0 \
     --num_scenes 10 \
+    --process_dynamic_mask
+
+
+conda activate segformer
+segformer_path=/DATA/ayc_data/SegFormer
+split=test
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+python datasets/tools/extract_masks.py \
+    --data_root /DATA/OmniRe-data-processed_10Hz/processed_10Hz/$split \
+    --segformer_path=$segformer_path \
+    --checkpoint=$segformer_path/pretrained/segformer.b5.1024x1024.city.160k.pth \
+    --start_idx 0 \
+    --num_scenes 150 \
     --process_dynamic_mask
 ```
 

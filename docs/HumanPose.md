@@ -65,7 +65,7 @@ Supported datasets for human body pose extraction:
 
    # Install additional dependencies
    pip install git+https://github.com/brjathu/PHALP.git
-   pip install git+https://github.com/facebookresearch/pytorch3d.git
+   pip install git+https://githubfast.com/facebookresearch/pytorch3d.git
 
    # Return to the project root
    cd ../..
@@ -117,6 +117,14 @@ Supported datasets for human body pose extraction:
    **NuScenes**
    ```bash
    conda activate 4D-humans
+
+   export PYTHONPATH=$(pwd)
+   export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+   python datasets/tools/humanpose_process.py \
+   --dataset nuscenes \
+   --data_root /DATA/OmniRe-data-processed_10Hz/processed_10Hz/test/ \
+   --scene_ids 3
+   [--save_temp] [--verbose]
 
    python datasets/tools/humanpose_process.py \
    --dataset nuscenes \
